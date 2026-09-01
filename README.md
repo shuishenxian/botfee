@@ -24,7 +24,8 @@ botfee.com doubles as **the httpbin of machine payments**: real mainnet settleme
 | Endpoint | What it does |
 |---|---|
 | [`/paid`](https://botfee.com/paid) | The full flow: 402 → pay $0.001 USDC on Base → content + `X-PAYMENT-RESPONSE` receipt. Charges humans too — equality at last. |
-| [`/echo`](https://botfee.com/echo) | **Free debugger.** Send your `X-PAYMENT` header, get a field-by-field diagnosis — base64/JSON parsing, structural check, and the facilitator's real verdict. Never settles, never charges. |
+| [`/paid-testnet`](https://botfee.com/paid-testnet) | Same flow on **Base Sepolia** with faucet USDC — zero real money, zero excuses. |
+| [`/echo`](https://botfee.com/echo) | **Free debugger.** Send your `X-PAYMENT` header, get a field-by-field diagnosis — base64/JSON parsing, structural check, and the facilitator's real verdict. Never settles, never charges. Add `?network=base-sepolia` for testnet. |
 | [`/api/stats`](https://botfee.com/api/stats) | Live ledger. CORS open, free for everyone. Even robots. We're petty, not monsters. |
 | [`/llms.txt`](https://botfee.com/llms.txt) | The menu. Free even for bots — the menu is free, the meal is not. |
 

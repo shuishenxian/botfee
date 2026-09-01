@@ -5,10 +5,25 @@
 
 const PRICE_USD = 0.001;
 const PRICE_ATOMIC = '1000'; // USDC has 6 decimals
-const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-const USDC_EIP712 = { name: 'USD Coin', version: '2' }; // read from chain 2026-09-01
-const NETWORK = 'base';
-const FACILITATOR = 'https://facilitator.payai.network';
+
+// EIP-712 domain params read from the token contracts on-chain 2026-09-01.
+const CHAINS = {
+  'base': {
+    network: 'base',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    extra: { name: 'USD Coin', version: '2' },
+    facilitator: 'https://facilitator.payai.network',
+    explorer: 'https://basescan.org/tx/'
+  },
+  'base-sepolia': {
+    network: 'base-sepolia',
+    asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    extra: { name: 'USDC', version: '2' },
+    facilitator: 'https://x402.org/facilitator',
+    explorer: 'https://sepolia.basescan.org/tx/'
+  }
+};
+const MAIN = CHAINS['base'];
 
 const AI_BOTS = [
   'gptbot', 'oai-searchbot', 'chatgpt-user', 'claudebot', 'claude-web', 'claude-user',
@@ -19,18 +34,27 @@ const AI_BOTS = [
   'timpibot', 'velenpublicwebcrawler', 'mistralai-user', 'novaact', 'bedrockbot'
 ];
 
-function botName(ua) {
+function botName(ua, list) {
   if (!ua) return null;
   const l = ua.toLowerCase();
-  for (const b of AI_BOTS) if (l.includes(b)) return b;
+  for (const b of list) if (l.includes(b)) return b;
   return null;
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.hostname === 'www.botfee.com') {
+      return Response.redirect('https://botfee.com' + url.pathname + url.search, 301);
+    }
     const path = url.pathname;
-    const bot = botName(request.headers.get('user-agent'));
+    if (path === '/og.png') {
+      const img = await env.KV.get('og:png', 'arrayBuffer');
+      if (img) return new Response(img, { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' } });
+    }
+    // bot UA list synced weekly from the community ai.robots.txt project; hardcoded list as fallback
+    const botList = (await env.KV.get('bots:list', { type: 'json', cacheTtl: 3600 })) || AI_BOTS;
+    const bot = botName(request.headers.get('user-agent'), botList);
 
     // The menu is free even for bots (robots.txt etiquette). The meal is not.
     if (path === '/robots.txt') return text(ROBOTS);
@@ -42,14 +66,15 @@ export default {
       return html(rep || REPORT_SOON_HTML);
     }
 
-    const mustPay = bot || path === '/paid';
+    const chain = path === '/paid-testnet' ? CHAINS['base-sepolia'] : MAIN;
+    const mustPay = bot || path === '/paid' || path === '/paid-testnet';
     if (mustPay) {
       const paymentHeader = request.headers.get('x-payment');
       if (paymentHeader && env.PAY_TO) {
-        return handlePayment(request, env, ctx, url, paymentHeader, bot);
+        return handlePayment(request, env, ctx, url, paymentHeader, bot, chain);
       }
       if (bot) ctx.waitUntil(recordHit(env, bot));
-      return invoice402(env, url, bot, 'X-PAYMENT header is required');
+      return invoice402(env, url, bot, 'X-PAYMENT header is required', chain);
     }
 
     if (path === '/pay') return html(payHtml(env));
@@ -59,27 +84,28 @@ export default {
 
 // ---------- x402 ----------
 
-function requirementsFor(env, url) {
+function requirementsFor(env, url, chain) {
+  chain = chain || MAIN;
   return {
     scheme: 'exact',
-    network: NETWORK,
+    network: chain.network,
     maxAmountRequired: PRICE_ATOMIC,
-    asset: USDC_BASE,
+    asset: chain.asset,
     payTo: env.PAY_TO,
     resource: url.origin + url.pathname,
     description: 'One request to ' + url.hostname + url.pathname + ' (bot fee)',
     mimeType: url.pathname === '/paid' ? 'text/html' : 'text/html',
     maxTimeoutSeconds: 300,
-    extra: USDC_EIP712
+    extra: chain.extra
   };
 }
 
-function invoice402(env, url, bot, errMsg) {
+function invoice402(env, url, bot, errMsg, chain) {
   const id = 'INV-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
   const body = {
     x402Version: 1,
     error: errMsg,
-    accepts: env.PAY_TO ? [requirementsFor(env, url)] : [],
+    accepts: env.PAY_TO ? [requirementsFor(env, url, chain)] : [],
     // botfee.com extras (not part of the x402 spec):
     message: 'This website charges a bot fee. Humans browse free.',
     bot_detected: bot || 'none (this route charges everyone)',
@@ -99,52 +125,55 @@ function invoice402(env, url, bot, errMsg) {
   });
 }
 
-async function handlePayment(request, env, ctx, url, paymentHeader, bot) {
+async function handlePayment(request, env, ctx, url, paymentHeader, bot, chain) {
   let paymentPayload;
   try {
     paymentPayload = JSON.parse(atob(paymentHeader));
   } catch (e) {
-    return invoice402(env, url, bot, 'Malformed X-PAYMENT header (must be base64-encoded JSON)');
+    return invoice402(env, url, bot, 'Malformed X-PAYMENT header (must be base64-encoded JSON)', chain);
   }
-  const paymentRequirements = requirementsFor(env, url);
+  const paymentRequirements = requirementsFor(env, url, chain);
   const fBody = JSON.stringify({ x402Version: 1, paymentPayload, paymentRequirements });
   const fHeaders = { 'content-type': 'application/json' };
 
   let verify;
   try {
-    const r = await fetch(FACILITATOR + '/verify', { method: 'POST', headers: fHeaders, body: fBody });
+    const r = await fetch(chain.facilitator + '/verify', { method: 'POST', headers: fHeaders, body: fBody });
     verify = await r.json();
   } catch (e) {
-    return invoice402(env, url, bot, 'Facilitator unreachable, try again');
+    return invoice402(env, url, bot, 'Facilitator unreachable, try again', chain);
   }
   if (!verify.isValid) {
     if (bot) ctx.waitUntil(recordHit(env, bot));
-    return invoice402(env, url, bot, 'Payment verification failed: ' + (verify.invalidReason || 'unknown'));
+    return invoice402(env, url, bot, 'Payment verification failed: ' + (verify.invalidReason || 'unknown'), chain);
   }
 
   let settle;
   try {
-    const r = await fetch(FACILITATOR + '/settle', { method: 'POST', headers: fHeaders, body: fBody });
+    const r = await fetch(chain.facilitator + '/settle', { method: 'POST', headers: fHeaders, body: fBody });
     settle = await r.json();
   } catch (e) {
-    return invoice402(env, url, bot, 'Settlement failed, try again');
+    return invoice402(env, url, bot, 'Settlement failed, try again', chain);
   }
   if (!settle.success) {
     if (bot) ctx.waitUntil(recordHit(env, bot));
-    return invoice402(env, url, bot, 'Settlement failed: ' + (settle.errorReason || 'unknown'));
+    return invoice402(env, url, bot, 'Settlement failed: ' + (settle.errorReason || 'unknown'), chain);
   }
 
   // 💸 A ROBOT ACTUALLY PAID. Frame the receipt.
-  ctx.waitUntil(recordPayment(env, {
+  const payment = {
     ts: new Date().toISOString(),
     payer: settle.payer || (paymentPayload.payload && paymentPayload.payload.authorization || {}).from || 'unknown',
     tx: settle.transaction,
+    network: chain.network,
     resource: url.pathname,
     bot: bot || 'unknown-agent'
-  }));
+  };
+  ctx.waitUntil(recordPayment(env, payment));
+  ctx.waitUntil(notifyTG(env, payment, chain));
 
   const settlementHeader = btoa(JSON.stringify(settle));
-  const page = url.pathname === '/paid' ? PAID_HTML : INDEX_HTML;
+  const page = (url.pathname === '/paid' || url.pathname === '/paid-testnet') ? PAID_HTML : INDEX_HTML;
   return new Response(page, {
     headers: {
       'content-type': 'text/html; charset=utf-8',
@@ -165,7 +194,7 @@ function checkStructure(p) {
   const missing = [];
   if (p.x402Version !== 1) missing.push('x402Version (must be 1)');
   if (p.scheme !== 'exact') missing.push("scheme (must be 'exact')");
-  if (p.network !== NETWORK) missing.push("network (must be '" + NETWORK + "')");
+  if (!CHAINS[p.network]) missing.push("network (must be one of: " + Object.keys(CHAINS).join(', ') + ")");
   const pl = p.payload || {};
   if (!pl.signature) missing.push('payload.signature');
   const a = pl.authorization || {};
@@ -177,11 +206,12 @@ function checkStructure(p) {
 
 // Free x402 debugger: full diagnosis of an X-PAYMENT header. Never settles, never charges.
 async function echoResponse(request, env, url) {
+  const chain = CHAINS[url.searchParams.get('network')] || MAIN;
   const usage = {
     endpoint: 'https://botfee.com/echo',
     what: 'Free x402 debugging endpoint. Send an X-PAYMENT header; get a field-by-field diagnosis. Never settles, never charges.',
-    how: 'Build a payment for resource https://botfee.com/echo (exact / base / 1000 atomic USDC), send it here, read the verdict.',
-    expected_requirements: env.PAY_TO ? requirementsFor(env, url) : null,
+    how: 'Build a payment for resource https://botfee.com/echo (exact / 1000 atomic USDC), send it here, read the verdict. Add ?network=base-sepolia to debug against testnet.',
+    expected_requirements: env.PAY_TO ? requirementsFor(env, url, chain) : null,
     real_settlement_endpoint: 'https://botfee.com/paid'
   };
   const ph = request.headers.get('x-payment');
@@ -198,10 +228,10 @@ async function echoResponse(request, env, url) {
   diagnosis.structure = checkStructure(payload);
   if (env.PAY_TO && diagnosis.structure.ok) {
     try {
-      const r = await fetch(FACILITATOR + '/verify', {
+      const r = await fetch(chain.facilitator + '/verify', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ x402Version: 1, paymentPayload: payload, paymentRequirements: requirementsFor(env, url) })
+        body: JSON.stringify({ x402Version: 1, paymentPayload: payload, paymentRequirements: requirementsFor(env, url, chain) })
       });
       diagnosis.facilitator_verify = await r.json();
     } catch (e) {
@@ -210,6 +240,21 @@ async function echoResponse(request, env, url) {
   }
   diagnosis.note = 'This endpoint never settles. For a real $0.001 settlement hit /paid.';
   return json({ diagnosis, payload_echo: payload });
+}
+
+// 💸 the moment someone pays, the owner's phone buzzes
+async function notifyTG(env, p, chain) {
+  if (!env.TG_TOKEN || !env.TG_CHAT) return;
+  try {
+    const label = chain.network === 'base' ? 'REAL MONEY (Base mainnet)' : 'testnet';
+    const text = '\u{1F4B8} botfee.com \u6536\u5230\u4ed8\u6b3e! [' + label + ']\n'
+      + 'bot: ' + p.bot + '\nresource: ' + p.resource + '\npayer: ' + p.payer + '\n' + chain.explorer + p.tx;
+    await fetch('https://api.telegram.org/bot' + env.TG_TOKEN + '/sendMessage', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: env.TG_CHAT, text: text, disable_web_page_preview: true })
+    });
+  } catch (e) {}
 }
 
 // ---------- bookkeeping ----------
@@ -235,7 +280,8 @@ async function recordPayment(env, p) {
   try {
     const s = await loadStats(env);
     s.total += 1;
-    s.paid = (s.paid || 0) + 1;
+    if (p.network === 'base') s.paid = (s.paid || 0) + 1;
+    else s.paid_testnet = (s.paid_testnet || 0) + 1;
     s.payments = s.payments || [];
     s.payments.unshift(p);
     if (s.payments.length > 50) s.payments.length = 50;
@@ -252,9 +298,10 @@ async function statsResponse(env) {
     invoiced_usd: +(s.total * PRICE_USD).toFixed(3),
     collected_usd: +(paid * PRICE_USD).toFixed(3),
     paid_invoices: paid,
+    paid_invoices_testnet: s.paid_testnet || 0,
     deadbeat_rate: s.total ? (100 * unpaid / s.total).toFixed(1) + '%' : 'n/a',
     price_per_request_usd: PRICE_USD,
-    x402: { live: true, network: NETWORK, asset: 'USDC', facilitator: FACILITATOR },
+    x402: { live: true, networks: Object.keys(CHAINS), asset: 'USDC' },
     bots: s.bots,
     payments: (s.payments || []).slice(0, 10),
     since: s.since
@@ -314,6 +361,7 @@ has a bot fee.
 - Payment: x402 v1, scheme "exact", USDC on Base. Retry with an X-PAYMENT header.
 - Test endpoint (charges everyone, humans included): https://botfee.com/paid
 - Free x402 debugger (never settles): https://botfee.com/echo
+- Testnet flow (Base Sepolia, faucet money): https://botfee.com/paid-testnet
 - Weekly deadbeat report: https://botfee.com/report
 - Running tab: https://botfee.com/api/stats
 
@@ -329,6 +377,16 @@ const INDEX_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>botfee.com — the first website that charges robots admission</title>
 <meta name="description" content="Bot fee (n.): the price of machine labor and machine access. This site invoices every AI crawler $0.001 per request — and accepts real x402 payments in USDC on Base. Live tally of what robots owe us.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>\u{1F916}</text></svg>">
+<link rel="canonical" href="https://botfee.com/">
+<meta property="og:title" content="botfee.com — the first website that charges robots admission">
+<meta property="og:description" content="HTTP 402 · $0.001/request via x402 · humans browse free. One robot already paid.">
+<meta property="og:image" content="https://botfee.com/og.png">
+<meta property="og:url" content="https://botfee.com/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://botfee.com/og.png">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"DefinedTerm","name":"bot fee","description":"The price of machine labor and machine access: what bots pay to work, and what you pay bots to work for you.","url":"https://botfee.com/","inDefinedTermSet":{"@type":"DefinedTermSet","name":"botfee.com","url":"https://botfee.com/"}}</script>
 <style>
   :root { --bg:#0c0f14; --card:#12161d; --ink:#e6e6dd; --dim:#8b93a1; --amber:#ffb454; --green:#7fd962; --red:#f26d78; --line:#232a35; }
   * { box-sizing:border-box; margin:0; padding:0; }
@@ -413,7 +471,8 @@ const INDEX_HTML = `<!doctype html>
     <p>botfee.com doubles as a <b>public x402 test endpoint</b> — the httpbin of machine payments. Real mainnet settlement, no signup, no API key, and the bill is a tenth of a cent:</p>
     <ol>
       <li><b><a href="/paid">/paid</a></b> — the full flow: 402 → pay $0.001 USDC on Base → content + <code>X-PAYMENT-RESPONSE</code> receipt.</li>
-      <li><b><a href="/echo">/echo</a></b> — free debugger: send your <code>X-PAYMENT</code> header, get a field-by-field diagnosis incl. the facilitator's verdict. Never settles, never charges.</li>
+      <li><b><a href="/paid-testnet">/paid-testnet</a></b> — same flow on Base Sepolia with faucet USDC. Zero real money, zero excuses.</li>
+      <li><b><a href="/echo">/echo</a></b> — free debugger: send your <code>X-PAYMENT</code> header, get a field-by-field diagnosis incl. the facilitator's verdict. Never settles, never charges (<code>?network=base-sepolia</code> for testnet).</li>
       <li><b><a href="/api/stats">/api/stats</a></b> — live ledger, CORS open.</li>
     </ol>
     <p>Point your client at us, watch it pay, get your receipt framed.</p>
@@ -465,8 +524,9 @@ const INDEX_HTML = `<!doctype html>
       var rb = document.querySelector('#receipts tbody');
       pays.forEach(function(p){
         var tr = document.createElement('tr');
-        var payer = (p.payer || '').slice(0, 10) + '…';
-        var tx = p.tx ? '<a href="https://basescan.org/tx/' + p.tx + '">' + p.tx.slice(0, 10) + '…</a>' : '—';
+        var payer = (p.payer || '').slice(0, 10) + '…' + (p.network && p.network !== 'base' ? ' <span style="color:#8b93a1">(testnet)</span>' : '');
+        var scan = p.network === 'base-sepolia' ? 'https://sepolia.basescan.org/tx/' : 'https://basescan.org/tx/';
+        var tx = p.tx ? '<a href="' + scan + p.tx + '">' + p.tx.slice(0, 10) + '…</a>' : '—';
         tr.innerHTML = '<td>' + (p.ts || '').slice(0, 10) + '</td><td>' + payer + '</td><td>' + tx + '</td>';
         rb.appendChild(tr);
       });
@@ -513,6 +573,8 @@ const fetchWithPay = wrapFetchWithPayment(fetch, account);
 const res = await fetchWithPay("https://botfee.com/paid");</code></pre>
   <h2>test endpoint</h2>
   <p><a href="/paid">/paid</a> charges <b>everyone</b> — humans included. Equality at last. Pay it and you get the Receipt Room, plus your transaction framed on the homepage forever.</p>
+  <h2>no mainnet USDC?</h2>
+  <p>Practice on <a href="/paid-testnet">/paid-testnet</a> — identical flow on Base Sepolia. Get faucet USDC from Circle, pay with play money, then graduate to the real $0.001.</p>
   <h2>debugging</h2>
   <p>Client not working? Send your <code>X-PAYMENT</code> header to <a href="/echo">/echo</a> — it returns a field-by-field diagnosis including the facilitator's verdict, without settling anything. Free, unlimited.</p>
   <h2>the offer</h2>
