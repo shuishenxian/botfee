@@ -1,0 +1,7 @@
+.test_wallet_key
+.payer_key
+data/
+node_modules/
+*.log
+.DS_Store
+scripts/

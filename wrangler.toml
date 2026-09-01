@@ -1,0 +1,16 @@
+name = "botfee"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+account_id = "3661f5bbd1ad3c91d0e99c5a57b23ff0"
+
+routes = [
+  { pattern = "botfee.com", custom_domain = true },
+  { pattern = "www.botfee.com", custom_domain = true }
+]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "ab85bb5535e84789893915868743364f"
+
+[vars]
+PAY_TO = "0xAeA7668E9169BF6c6AF00222d30e720E7e6B5B72"
