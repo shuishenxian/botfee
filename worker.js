@@ -439,7 +439,7 @@ const INDEX_HTML = `<!doctype html>
   </section>
 
   <footer>
-    <p>humans: free · search engines: free · AI bots: $0.001/request via x402 · <a href="/llms.txt">llms.txt</a> · <a href="/api/stats">stats</a> · <a href="/pay">pay</a></p>
+    <p>humans: free · search engines: free · AI bots: $0.001/request via x402 · <a href="/llms.txt">llms.txt</a> · <a href="/api/stats">stats</a> · <a href="/pay">pay</a> · <a href="https://github.com/shuishenxian/botfee">github</a></p>
     <p>© 2026 botfee.com — the canonical home of the bot fee</p>
   </footer>
 </div>
